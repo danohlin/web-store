@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app, createCategory, createProduct } from './helpers.js';
+import { prisma } from '../src/lib/prisma.js';
 
 describe('GET /api/products', () => {
   it('lists only active products', async () => {
@@ -119,6 +120,62 @@ describe('full-text search', () => {
 
     expect(res.body.items).toHaveLength(1);
     expect(res.body.items[0].name).toBe('Wired Headphones');
+  });
+
+  it('matches on category name even when the product text never says it', async () => {
+    const coffee = await createCategory('coffee', 'Coffee');
+    await createProduct({
+      name: 'Burr Grinder Pro',
+      description: 'Forty grind settings from espresso to French press',
+      categoryIds: [coffee.id],
+    });
+    await createProduct({ name: 'Merino Sweater', description: 'Soft wool knitwear' });
+
+    const res = await request(app).get('/api/products?q=coffee').expect(200);
+
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].name).toBe('Burr Grinder Pro');
+  });
+
+  it('re-indexes when a product is moved out of a category', async () => {
+    const coffee = await createCategory('coffee', 'Coffee');
+    const product = await createProduct({ name: 'Burr Grinder Pro', categoryIds: [coffee.id] });
+
+    await request(app).get('/api/products?q=coffee').expect(200).expect((res) => {
+      expect(res.body.items).toHaveLength(1);
+    });
+
+    // The product row itself is untouched here, so only a trigger on the join
+    // table can keep the vector correct.
+    await prisma.productCategory.deleteMany({ where: { productId: product.id } });
+
+    const after = await request(app).get('/api/products?q=coffee').expect(200);
+    expect(after.body.items).toHaveLength(0);
+  });
+
+  it('re-indexes every product when a category is renamed', async () => {
+    const category = await createCategory('hot-drinks', 'Hot Drinks');
+    await createProduct({ name: 'Burr Grinder Pro', categoryIds: [category.id] });
+
+    await prisma.category.update({ where: { id: category.id }, data: { name: 'Coffee' } });
+
+    const found = await request(app).get('/api/products?q=coffee').expect(200);
+    expect(found.body.items).toHaveLength(1);
+
+    const gone = await request(app).get('/api/products?q=%22hot%20drinks%22').expect(200);
+    expect(gone.body.items).toHaveLength(0);
+  });
+
+  it('ranks a name match above a category-only match', async () => {
+    const coffee = await createCategory('coffee', 'Coffee');
+    await createProduct({ name: 'Burr Grinder Pro', categoryIds: [coffee.id] });
+    await createProduct({ name: 'Coffee Table Book', description: 'Photography' });
+
+    const res = await request(app).get('/api/products?q=coffee').expect(200);
+
+    expect(res.body.items).toHaveLength(2);
+    // Name carries weight A, category weight B.
+    expect(res.body.items[0].name).toBe('Coffee Table Book');
   });
 
   it('returns an empty page rather than an error for gibberish', async () => {
