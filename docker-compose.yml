@@ -1,0 +1,27 @@
+name: web-store
+
+# Local development stack. Backend and frontend services are added in phase 3;
+# for now this provides the Postgres instance used for migrations and tests.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: web-store-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: webstore
+      POSTGRES_PASSWORD: webstore
+      POSTGRES_DB: webstore
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U webstore -d webstore']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  pgdata:
