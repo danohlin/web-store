@@ -7,6 +7,8 @@ import { defineConfig } from 'prisma/config';
 export default defineConfig({
   schema: path.join('prisma', 'schema.prisma'),
   migrations: {
-    seed: 'tsx prisma/seed.ts',
+    // Lives under src/ so it compiles into dist/ and can run in the container,
+    // where tsx is not installed.
+    seed: 'tsx src/seed.ts',
   },
 });
