@@ -18,6 +18,12 @@ locals {
   state_bucket = "${var.project}-tfstate-${local.account_id}"
 
   repositories = ["backend", "frontend", "migrator"]
+
+  # Main branch only unless explicitly overridden.
+  github_subjects = coalesce(
+    var.github_allowed_subjects,
+    ["repo:${var.github_repository}:ref:refs/heads/main"],
+  )
 }
 
 # ---------------------------------------------------------------- state store

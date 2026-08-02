@@ -18,6 +18,16 @@ output "ecr_registry" {
   value       = "${local.account_id}.dkr.ecr.${var.region}.amazonaws.com"
 }
 
+output "github_actions_role_arn" {
+  description = "Set as the AWS_ROLE_ARN repository variable in GitHub. Not a secret — it grants nothing without a matching OIDC token from the trusted repository and ref."
+  value       = aws_iam_role.github_actions.arn
+}
+
+output "github_trusted_subjects" {
+  description = "OIDC subjects allowed to assume the CI role."
+  value       = local.github_subjects
+}
+
 output "backend_config" {
   description = "Ready-made -backend-config values for the ephemeral stack."
   value = {
