@@ -27,15 +27,32 @@ docker-compose.override.yml
 
 # --- Terraform ---
 **/.terraform/*
+# State holds every secret in plaintext, including generated DB passwords.
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfvars.json
 !*.tfvars.example
 crash.log
 crash.*.log
 .terraformrc
 terraform.rc
-.terraform.lock.hcl
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored. It pins provider
+# versions and hashes, and committing it is what makes an apply reproducible.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+tfplan
+*.tfplan
+
+# --- Cloud / cluster credentials ---
+.aws/
+credentials
+*.kubeconfig
+kubeconfig
+kubeconfig-*
+*.retry
 
 # --- Kubernetes / Helm ---
 *.kubeconfig

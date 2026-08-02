@@ -73,7 +73,7 @@ app:
 secrets:
   enabled: true
   mountPath: /mnt/secrets
-  region: eu-west-1
+  region: us-east-1
   # Secrets Manager names, supplied by Terraform.
   databaseSecretName: ''
   appSecretName: ''

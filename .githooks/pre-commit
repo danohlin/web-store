@@ -1,0 +1,99 @@
+#!/bin/sh
+# Blocks credentials, private keys and AWS account identifiers from being
+# committed. Enabled by `git config core.hooksPath .githooks` (see
+# scripts/install-hooks.ps1).
+#
+# Deliberately dependency-free so it always runs. If gitleaks happens to be on
+# PATH it runs too, as a second opinion.
+#
+# To bypass for a genuine false positive, append the marker
+#   pragma: allowlist secret
+# to the offending line, or as a last resort commit with --no-verify.
+
+set -eu
+
+RED=''
+YELLOW=''
+RESET=''
+if [ -t 1 ]; then
+  RED=$(printf '\033[31m'); YELLOW=$(printf '\033[33m'); RESET=$(printf '\033[0m')
+fi
+
+fail=0
+
+note() { printf '%s%s%s\n' "$RED" "$1" "$RESET" >&2; }
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -n "$staged" ] || exit 0
+
+# --------------------------------------------------------------------------
+# 1. Paths that must never be committed
+# --------------------------------------------------------------------------
+for f in $staged; do
+  case "$f" in
+    *.example|*.sample|*.md) continue ;;
+  esac
+
+  case "$f" in
+    .env|.env.*|*/.env|*/.env.*)
+      note "BLOCKED  $f  — environment files hold real credentials"; fail=1 ;;
+    *.tfvars|*.tfvars.json|*.auto.tfvars)
+      note "BLOCKED  $f  — tfvars routinely contain account ids and secrets"; fail=1 ;;
+    *.tfstate|*.tfstate.*)
+      note "BLOCKED  $f  — Terraform state stores secrets in plaintext"; fail=1 ;;
+    *.pem|*.key|*.p12|*.pfx|*id_rsa*|*id_ed25519*)
+      note "BLOCKED  $f  — looks like a private key"; fail=1 ;;
+    *kubeconfig*|*/credentials|.aws/*)
+      note "BLOCKED  $f  — cluster or cloud credentials"; fail=1 ;;
+  esac
+done
+
+# --------------------------------------------------------------------------
+# 2. Credential-shaped content in the staged diff
+# --------------------------------------------------------------------------
+# Only added lines are examined, and any line carrying the allowlist marker is
+# skipped.
+added=$(git diff --cached --unified=0 --diff-filter=ACMR \
+        | grep '^+' | grep -v '^+++' | grep -v 'pragma: allowlist secret' || true)
+
+# Case-insensitive: POSIX ERE has no inline (?i) flag.
+scan() {
+  pattern=$1
+  message=$2
+  if printf '%s\n' "$added" | grep -Eiq "$pattern"; then
+    note "BLOCKED  $message"
+    printf '%s\n' "$added" | grep -Ei "$pattern" | head -3 | sed 's/^/         /' >&2
+    fail=1
+  fi
+}
+
+# Each pattern carries the allowlist marker so that this file does not trip its
+# own scan when it is itself staged.
+scan '(AKIA|ASIA)[0-9A-Z]{16}'                      'AWS access key id'                         # pragma: allowlist secret
+scan 'aws_secret_access_key'                        'AWS secret access key assignment'          # pragma: allowlist secret
+scan 'BEGIN [A-Z ]*PRIVATE KEY'                     'private key block'                         # pragma: allowlist secret
+# ARNs and ECR hostnames both embed the 12-digit AWS account id. Terraform
+# should derive it from aws_caller_identity instead of hardcoding it.
+scan 'arn:aws[a-z-]*:[a-z0-9-]*:[a-z0-9-]*:[0-9]{12}:' 'hardcoded AWS account id in an ARN'     # pragma: allowlist secret
+scan '[0-9]{12}\.dkr\.ecr\.'                        'hardcoded AWS account id in an ECR URI'    # pragma: allowlist secret
+scan 'xox[baprs]-[0-9A-Za-z-]{10,}'                 'Slack token'                               # pragma: allowlist secret
+scan 'gh[pousr]_[0-9A-Za-z]{20,}'                   'GitHub token'                              # pragma: allowlist secret
+
+# --------------------------------------------------------------------------
+# 3. Second opinion, when available
+# --------------------------------------------------------------------------
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks protect --staged --redact --no-banner >/dev/null 2>&1; then
+    note 'BLOCKED  gitleaks flagged the staged changes'
+    gitleaks protect --staged --redact --no-banner 2>&1 | head -20 >&2
+    fail=1
+  fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+  printf '%sCommit aborted. Nothing was committed.%s\n' "$YELLOW" "$RESET" >&2
+  printf 'If this is genuinely a false positive, add "pragma: allowlist secret" to the line.\n' >&2
+  exit 1
+fi
+
+exit 0
