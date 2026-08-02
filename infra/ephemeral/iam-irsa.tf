@@ -125,8 +125,11 @@ resource "aws_iam_policy" "read_app_secrets" {
   policy      = data.aws_iam_policy_document.read_app_secrets.json
 }
 
+# Fixed name for the same reason as the secrets: CI needs this ARN to pass as
+# serviceAccount.roleArn, and deriving it from the naming convention is far
+# better than giving CI access to Terraform state.
 resource "aws_iam_role" "app" {
-  name_prefix        = "${local.name}-app-"
+  name               = "${local.name}-app"
   assume_role_policy = data.aws_iam_policy_document.irsa_trust["app"].json
 
   tags = {

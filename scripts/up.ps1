@@ -66,6 +66,7 @@ try {
   $registry = terraform output -raw ecr_registry
   $region = terraform output -raw region
   $repos = terraform output -json ecr_repository_urls | ConvertFrom-Json
+  $ciRoleArn = terraform output -raw github_actions_role_arn
   Ok "State bucket: $stateBucket"
 } finally { Pop-Location }
 
@@ -83,6 +84,13 @@ try {
     -backend-config="encrypt=true" `
     -backend-config="use_lockfile=true" | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'terraform init failed' }
+
+  # Grant the CI role cluster access. IAM permissions alone give it nothing
+  # inside Kubernetes; without this access entry, GitHub Actions authenticates
+  # to AWS successfully and is then refused by the cluster.
+  # Passed as TF_VAR_ rather than -var to avoid quoting a JSON list through
+  # PowerShell's argument parser.
+  $env:TF_VAR_cluster_admin_principals = (ConvertTo-Json @($ciRoleArn) -Compress)
 
   if (-not $SkipInfra) {
     terraform apply -auto-approve -input=false

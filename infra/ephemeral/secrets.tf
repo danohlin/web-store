@@ -21,8 +21,16 @@ locals {
 # Deliberately shaped like the JSON an RDS-managed rotation would produce, so
 # the SecretProviderClass jmesPath in the Helm chart works unchanged if
 # rotation is enabled later.
+# Fixed name rather than name_prefix, so CI can construct it from project and
+# environment alone. The alternative — having CI read it from Terraform state —
+# would mean granting CI read access to a file that holds the database password
+# in plaintext.
+#
+# A fixed name is only safe here because recovery_window_in_days is 0. With the
+# default window the name would stay reserved after a destroy and tomorrow's
+# apply would collide with it.
 resource "aws_secretsmanager_secret" "database" {
-  name_prefix             = "${local.secret_prefix}/db-"
+  name                    = "${local.secret_prefix}/db"
   description             = "Postgres connection details for ${local.name}"
   recovery_window_in_days = 0
 
@@ -69,7 +77,7 @@ resource "random_password" "seed_customer" {
 }
 
 resource "aws_secretsmanager_secret" "app" {
-  name_prefix             = "${local.secret_prefix}/app-"
+  name                    = "${local.secret_prefix}/app"
   description             = "Application signing keys and seed credentials for ${local.name}"
   recovery_window_in_days = 0
 
