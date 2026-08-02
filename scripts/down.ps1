@@ -55,9 +55,21 @@ if (-not $Force) {
 $started = Get-Date
 
 # Region and bucket come from the persistent stack, which always exists.
+$account = (aws sts get-caller-identity --query Account --output text 2>$null)
+if (-not $account) { throw 'AWS credentials are not configured.' }
+$account = $account.Trim()
+
 Push-Location $persistentDir
 try {
-  terraform init -input=false | Out-Null
+  # Derived, not committed: the bucket name embeds the account id.
+  terraform init -input=false -reconfigure `
+    -backend-config="bucket=web-store-tfstate-$account" `
+    -backend-config="key=persistent/terraform.tfstate" `
+    -backend-config="region=us-east-1" `
+    -backend-config="encrypt=true" `
+    -backend-config="use_lockfile=true" | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'persistent terraform init failed' }
+
   $stateBucket = terraform output -raw state_bucket
   $region = terraform output -raw region
 } finally { Pop-Location }

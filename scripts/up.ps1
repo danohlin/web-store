@@ -60,7 +60,16 @@ Ok "Authenticated as $($identity.Arn)"
 Step 'Persistent stack (state bucket + ECR)'
 Push-Location $persistentDir
 try {
-  terraform init -input=false | Out-Null
+  # Backend config is derived rather than committed: the bucket name embeds the
+  # account id, and this repository is public.
+  terraform init -input=false -reconfigure `
+    -backend-config="bucket=web-store-tfstate-$($identity.Account)" `
+    -backend-config="key=persistent/terraform.tfstate" `
+    -backend-config="region=us-east-1" `
+    -backend-config="encrypt=true" `
+    -backend-config="use_lockfile=true" | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'persistent terraform init failed' }
+
   terraform apply -auto-approve -input=false | Out-Null
   $stateBucket = terraform output -raw state_bucket
   $registry = terraform output -raw ecr_registry

@@ -45,6 +45,9 @@ override.tf.json
 *_override.tf.json
 tfplan
 *.tfplan
+# Backend configs name the state bucket, which embeds the AWS account id.
+backend.hcl
+!backend.hcl.example
 
 # --- Cloud / cluster credentials ---
 .aws/

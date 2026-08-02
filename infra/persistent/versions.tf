@@ -12,20 +12,21 @@ terraform {
     }
   }
 
-  # Local state on purpose. This stack creates the very bucket the ephemeral
-  # stack stores its state in, so it cannot store its state there on the first
-  # apply. It is applied once and then left alone.
+  # State lives in the bucket this stack itself creates, so no state file sits
+  # on local disk. That matters because state records the AWS account id and,
+  # for the other stack, generated passwords in plaintext.
   #
-  # If you would rather keep it remote, apply once, then uncomment the block
-  # below and run: terraform init -migrate-state
+  # Configured at init time rather than inline, because the bucket name embeds
+  # the account id and this file is committed to a public repository:
+  #   terraform init -backend-config=backend.hcl
+  # The up and down scripts derive it automatically.
   #
-  # backend "s3" {
-  #   bucket       = "web-store-tfstate-<account-id>"
-  #   key          = "persistent/terraform.tfstate"
-  #   region       = "us-east-1"
-  #   encrypt      = true
-  #   use_lockfile = true
-  # }
+  # Bootstrapping from nothing is a two-step dance, since the bucket cannot
+  # hold the state that creates it:
+  #   terraform init -backend=false
+  #   terraform apply                       # creates the bucket
+  #   terraform init -backend-config=backend.hcl -migrate-state
+  backend "s3" {}
 }
 
 provider "aws" {
