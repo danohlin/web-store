@@ -19,10 +19,19 @@ locals {
 
   repositories = ["backend", "frontend", "migrator"]
 
+  # GitHub presents an immutable subject claim of the form
+  #   repo:OWNER@OWNERID/REPO@REPOID:ref:refs/heads/main
+  # not the name-only "repo:OWNER/REPO:ref:..." that most documentation shows.
+  # Matching the name-only form fails with a bare "Not authorized to perform
+  # sts:AssumeRoleWithWebIdentity" and a trust policy that looks correct.
+  github_owner      = split("/", var.github_repository)[0]
+  github_repo       = split("/", var.github_repository)[1]
+  github_subject_id = "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}"
+
   # Main branch only unless explicitly overridden.
   github_subjects = coalesce(
     var.github_allowed_subjects,
-    ["repo:${var.github_repository}:ref:refs/heads/main"],
+    ["${local.github_subject_id}:ref:refs/heads/main"],
   )
 }
 

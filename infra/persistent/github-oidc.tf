@@ -9,20 +9,23 @@
 # ephemeral environment is torn down.
 #
 
-data "tls_certificate" "github" {
-  url = "https://token.actions.githubusercontent.com/.well-known/openid-configuration"
-}
-
 resource "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
 
   # The audience GitHub requests when configure-aws-credentials runs.
   client_id_list = ["sts.amazonaws.com"]
 
-  # Read from the live certificate rather than pinned to a literal. AWS no
-  # longer verifies this value for GitHub's endpoint, but the API still
-  # requires it, and a hardcoded thumbprint silently rots when the CA rotates.
-  thumbprint_list = [data.tls_certificate.github.certificates[0].sha1_fingerprint]
+  # GitHub's published root CA thumbprints, both of them.
+  #
+  # Derived thumbprints were tried first and did not work: tls_certificate
+  # returns the chain leaf-first, so the widely-copied `certificates[0]` gives
+  # the endpoint's own leaf certificate, and the chain root as observed from a
+  # given machine is not necessarily the CA AWS expects either.
+  #
+  # AWS documents that it no longer verifies this value for GitHub's endpoint,
+  # but supplying the correct pair costs nothing and removes the variable.
+  # Both are listed because GitHub serves from two CAs and rotates between them.
+  thumbprint_list = var.github_oidc_thumbprints
 
   tags = {
     Name = "github-actions-oidc"
