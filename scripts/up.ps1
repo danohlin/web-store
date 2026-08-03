@@ -200,11 +200,27 @@ helm upgrade --install csi-secrets-store secrets-store-csi-driver/secrets-store-
   --wait --timeout 5m | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'CSI driver install failed' }
 
+# The AWS provider chart bundles the driver as a subchart, enabled by default.
+# Leaving it on makes this release try to own a ServiceAccount named
+# secrets-store-csi-driver that the driver release above already owns, and helm
+# refuses with an ownership metadata error. Disable the subchart.
+#
+# fullnameOverride pins the provider's own ServiceAccount to
+# secrets-store-csi-driver-provider-aws. Without it the name is prefixed with
+# the release name and no longer matches the IRSA trust policy in Terraform.
+#
+# The chart exposes no serviceAccount.annotations value, so the IRSA annotation
+# is applied afterwards with kubectl.
 helm upgrade --install secrets-provider-aws aws-secrets-manager/secrets-store-csi-driver-provider-aws `
   --namespace kube-system `
-  --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$($tf.csi_driver_role_arn)" `
+  --set "secrets-store-csi-driver.install=false" `
+  --set fullnameOverride=secrets-store-csi-driver-provider-aws `
   --wait --timeout 5m | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'CSI AWS provider install failed' }
+
+kubectl annotate serviceaccount secrets-store-csi-driver-provider-aws `
+  -n kube-system "eks.amazonaws.com/role-arn=$($tf.csi_driver_role_arn)" --overwrite | Out-Null
+
 Ok 'Secrets Store CSI driver ready'
 
 # ---------------------------------------------------------------------------
