@@ -153,9 +153,21 @@ variable "db_instance_class" {
 }
 
 variable "db_engine_version" {
-  description = "Postgres major version. Must match what the application expects."
+  description = <<-EOT
+    Postgres version.
+
+    Major-only on purpose. RDS retires minor versions steadily, so a pinned
+    "16.6" silently becomes uncreatable — the apply then fails at the database,
+    after the VPC and cluster have already been built and billed for. Giving
+    just "16" lets RDS select the current minor, and the provider compares by
+    prefix so this does not produce a perpetual diff.
+
+    Check what exists with:
+      aws rds describe-db-engine-versions --engine postgres \
+        --query 'DBEngineVersions[].EngineVersion'
+  EOT
   type        = string
-  default     = "16.6"
+  default     = "16"
 }
 
 variable "db_allocated_storage_gb" {

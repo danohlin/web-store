@@ -70,7 +70,12 @@ try {
     -backend-config="use_lockfile=true" | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'persistent terraform init failed' }
 
-  terraform apply -auto-approve -input=false | Out-Null
+  # Not piped to Out-Null: PowerShell turns a native command's stderr into a
+  # NativeCommandError and the real Terraform message is lost, which makes a
+  # failure here almost undiagnosable.
+  terraform apply -auto-approve -input=false
+  if ($LASTEXITCODE -ne 0) { throw 'persistent terraform apply failed' }
+
   $stateBucket = terraform output -raw state_bucket
   $registry = terraform output -raw ecr_registry
   $region = terraform output -raw region
