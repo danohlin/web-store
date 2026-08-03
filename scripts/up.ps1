@@ -42,6 +42,35 @@ $chartDir = Join-Path $repoRoot 'helm/web-store'
 function Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 function Info($msg) { Write-Host "    $msg" -ForegroundColor DarkGray }
 function Ok($msg) { Write-Host "    $msg" -ForegroundColor Green }
+function Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
+
+<#
+Terraform holds a state lock for the duration of an operation and releases it
+on exit. A run that is killed — Ctrl-C, a timeout, a closed window — never gets
+to release it, and every later run then fails with "Error acquiring the state
+lock" until it is cleared by hand.
+
+This clears a lock only when no terraform process is running locally, which is
+the signature of an abandoned run rather than a concurrent one. It deliberately
+does not force past a live operation.
+#>
+function Clear-StaleLock {
+  param([string]$Output)
+
+  if ($Output -notmatch 'Error acquiring the state lock') { return $false }
+
+  $lockId = [regex]::Match($Output, 'ID:\s+([0-9a-f-]{36})').Groups[1].Value
+  if (-not $lockId) { return $false }
+
+  if (Get-Process terraform -ErrorAction SilentlyContinue) {
+    Warn 'State is locked and terraform is running elsewhere. Not forcing.'
+    return $false
+  }
+
+  Warn "Clearing a stale state lock left by an interrupted run ($lockId)"
+  terraform force-unlock -force $lockId 2>&1 | Out-Null
+  return $true
+}
 
 $started = Get-Date
 
@@ -107,8 +136,18 @@ try {
   $env:TF_VAR_cluster_admin_principals = (ConvertTo-Json @($ciRoleArn) -Compress)
 
   if (-not $SkipInfra) {
-    terraform apply -auto-approve -input=false
-    if ($LASTEXITCODE -ne 0) { throw 'terraform apply failed' }
+    # Captured so a stale lock can be detected, then retried once. Tee-Object
+    # keeps the output visible rather than swallowing a real failure.
+    $applyOut = (terraform apply -auto-approve -input=false 2>&1 | Tee-Object -Variable shown | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+      if (Clear-StaleLock -Output $applyOut) {
+        Info 'Retrying apply...'
+        terraform apply -auto-approve -input=false
+        if ($LASTEXITCODE -ne 0) { throw 'terraform apply failed after clearing the lock' }
+      } else {
+        throw 'terraform apply failed'
+      }
+    }
   } else {
     Info 'Skipped (using existing infrastructure)'
   }

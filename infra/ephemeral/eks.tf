@@ -156,17 +156,18 @@ resource "aws_eks_node_group" "main" {
     max_unavailable = 1
   }
 
-  # Matches the toleration in values-dev.yaml, so workloads have to opt in to
-  # running on interruptible capacity.
-  dynamic "taint" {
-    for_each = var.node_capacity_type == "SPOT" ? [1] : []
-    content {
-      key    = "spot"
-      value  = "true"
-      effect = "NO_SCHEDULE"
-    }
-  }
-
+  # No taint on Spot capacity.
+  #
+  # A spot=true:NoSchedule taint was tried and broke the cluster: CoreDNS
+  # tolerates only CriticalAddonsOnly, so its pods stayed Pending forever, the
+  # coredns add-on never reached ACTIVE, and terraform apply hung for 17 minutes
+  # with two healthy but unusable nodes.
+  #
+  # The taint also bought nothing. It exists to make workloads opt in to
+  # interruptible capacity, which only matters in a mixed cluster. Every node
+  # here is Spot, so there is nothing to opt out of. Reintroduce it only
+  # alongside an on-demand group, and then give CoreDNS a matching toleration
+  # through the add-on's configuration_values.
   labels = {
     "capacity-type" = lower(var.node_capacity_type)
   }

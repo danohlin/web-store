@@ -39,9 +39,6 @@ migration:
 podDisruptionBudget:
   enabled: false
 
-# Dev nodes run on spot capacity to cut the hourly cost.
-tolerations:
-  - key: spot
-    operator: Equal
-    value: 'true'
-    effect: NoSchedule
+# No tolerations needed: the node group carries no taint. See the comment in
+# infra/ephemeral/eks.tf for why the spot taint was removed.
+tolerations: []
