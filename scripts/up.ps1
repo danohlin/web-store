@@ -54,6 +54,34 @@ This clears a lock only when no terraform process is running locally, which is
 the signature of an abandoned run rather than a concurrent one. It deliberately
 does not force past a live operation.
 #>
+<#
+Runs terraform and returns its exit code plus stderr, without tripping
+$ErrorActionPreference = 'Stop'.
+
+PowerShell turns a native command's stderr into ErrorRecord objects, and under
+'Stop' the first one is a terminating error — so `terraform ... 2>&1` aborts the
+script before any `if ($LASTEXITCODE ...)` check can run, making the error
+handling below unreachable. Redirecting stderr to a file and relaxing the
+preference for the duration avoids that.
+#>
+function Invoke-Terraform {
+  param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $errFile = [IO.Path]::GetTempFileName()
+  try {
+    & terraform @Arguments 2>$errFile
+    $code = $LASTEXITCODE
+    $stderr = if (Test-Path $errFile) { (Get-Content $errFile -Raw) } else { '' }
+    if ($stderr) { Write-Host $stderr }
+    return [pscustomobject]@{ ExitCode = $code; Stderr = $stderr }
+  } finally {
+    Remove-Item $errFile -Force -ErrorAction SilentlyContinue
+    $ErrorActionPreference = $previous
+  }
+}
+
 function Clear-StaleLock {
   param([string]$Output)
 
@@ -136,14 +164,12 @@ try {
   $env:TF_VAR_cluster_admin_principals = (ConvertTo-Json @($ciRoleArn) -Compress)
 
   if (-not $SkipInfra) {
-    # Captured so a stale lock can be detected, then retried once. Tee-Object
-    # keeps the output visible rather than swallowing a real failure.
-    $applyOut = (terraform apply -auto-approve -input=false 2>&1 | Tee-Object -Variable shown | Out-String)
-    if ($LASTEXITCODE -ne 0) {
-      if (Clear-StaleLock -Output $applyOut) {
+    $apply = Invoke-Terraform apply -auto-approve -input=false
+    if ($apply.ExitCode -ne 0) {
+      if (Clear-StaleLock -Output $apply.Stderr) {
         Info 'Retrying apply...'
-        terraform apply -auto-approve -input=false
-        if ($LASTEXITCODE -ne 0) { throw 'terraform apply failed after clearing the lock' }
+        $retry = Invoke-Terraform apply -auto-approve -input=false
+        if ($retry.ExitCode -ne 0) { throw 'terraform apply failed after clearing the lock' }
       } else {
         throw 'terraform apply failed'
       }
@@ -188,15 +214,49 @@ helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-contro
   --set vpcId=$($tf.vpc_id) `
   --wait --timeout 5m | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'ALB controller install failed' }
+
+<#
+Restart the controller after every upgrade.
+
+The chart mints a self-signed webhook certificate on each helm run, updating
+both the TLS secret and the caBundle in the webhook configuration. The pods do
+not restart, because the Deployment spec itself has not changed — so they keep
+serving the certificate mounted at their original start, which no longer
+matches the CA the API server now expects.
+
+Nothing breaks until the next deploy, and then everything does: the webhook
+intercepts every Service admission, so the whole release fails with
+
+  failed calling webhook "mservice.elbv2.k8s.aws": x509: certificate signed by
+  unknown authority
+
+which reads like a cluster CA problem rather than a stale pod.
+#>
+kubectl rollout restart deployment aws-load-balancer-controller -n kube-system | Out-Null
+kubectl rollout status deployment aws-load-balancer-controller -n kube-system --timeout=180s | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'ALB controller did not become ready after restart' }
+
 Ok 'ALB controller ready'
 
 Info 'Secrets Store CSI driver...'
-# syncSecret disabled and only the file mount enabled: values must never be
-# copied into Kubernetes Secrets, or they would land in etcd.
+<#
+syncSecret stays off: values must never be copied into Kubernetes Secrets, or
+they would land in etcd, which is the whole point of mounting them as files.
+
+tokenRequests is required and defaults to empty. The AWS provider assumes the
+IRSA role of the pod whose volume it is mounting, which means it needs that
+pod's service account token — and the driver only supplies one when an audience
+is requested here. Without it every mount fails with:
+
+  CSI token error: serviceAccount.tokens not provided
+
+The audience must be sts.amazonaws.com to match what AWS STS expects.
+#>
 helm upgrade --install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver `
   --namespace kube-system `
   --set syncSecret.enabled=false `
   --set enableSecretRotation=false `
+  --set "tokenRequests[0].audience=sts.amazonaws.com" `
   --wait --timeout 5m | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'CSI driver install failed' }
 

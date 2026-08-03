@@ -36,7 +36,23 @@ server {
     # No security-headers include here on purpose: these are the API's own
     # responses, and the backend sets its headers via helmet.
     location /api/ {
-        proxy_pass ${BACKEND_ORIGIN};
+        # Resolved per request, not once at startup.
+        #
+        # A literal hostname in proxy_pass is resolved when nginx loads its
+        # config, so if the backend Service is not yet in DNS the container dies
+        # with "host not found in upstream" and crashloops until it is. Assigning
+        # to a variable defers resolution to request time, which also means a
+        # backend restart or Service IP change needs no nginx restart.
+        #
+        # With a variable, nginx no longer appends the matched location URI, so
+        # $request_uri has to be passed explicitly — it carries the full path and
+        # query string.
+        #
+        # NGINX_LOCAL_RESOLVERS is exported by the image's own entrypoint from
+        # /etc/resolv.conf, so this works unchanged in compose and in Kubernetes.
+        resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+        set $api_backend "${BACKEND_ORIGIN}";
+        proxy_pass $api_backend$request_uri;
 
         proxy_http_version 1.1;
         proxy_set_header Host              $host;

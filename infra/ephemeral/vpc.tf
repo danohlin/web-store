@@ -141,58 +141,13 @@ resource "aws_route_table_association" "private" {
 
 # ----------------------------------------------------------- security groups
 
-resource "aws_security_group" "nodes" {
-  name_prefix = "${local.name}-nodes-"
-  description = "EKS worker nodes"
-  vpc_id      = aws_vpc.main.id
-
-  # No inbound rules from the internet even though the nodes hold public IPs.
-  # The ALB reaches pods through its own security group rule below, and the
-  # control plane is allowed in by the EKS-managed cluster security group.
-
-  egress {
-    description = "All outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "${local.name}-nodes"
-    # Lets the controller attach its own rules for ALB target traffic.
-    "kubernetes.io/cluster/${local.name}" = "owned"
-  }
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "aws_security_group_rule" "nodes_self" {
-  description              = "Pod to pod within the cluster"
-  type                     = "ingress"
-  from_port                = 0
-  to_port                  = 65535
-  protocol                 = "-1"
-  security_group_id        = aws_security_group.nodes.id
-  source_security_group_id = aws_security_group.nodes.id
-}
-
 resource "aws_security_group" "database" {
   name_prefix = "${local.name}-db-"
   description = "RDS Postgres"
   vpc_id      = aws_vpc.main.id
 
-  # Reachable only from the node security group. There is no public route to
-  # these subnets at all.
-  ingress {
-    description     = "Postgres from cluster nodes"
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.nodes.id]
-  }
+  # Ingress is a separate rule below, so that it can reference the cluster
+  # security group without creating an ordering problem here.
 
   tags = {
     Name = "${local.name}-db"
@@ -201,4 +156,23 @@ resource "aws_security_group" "database" {
   lifecycle {
     create_before_destroy = true
   }
+}
+
+# Postgres is reachable only from inside the cluster; the private subnets have
+# no route to or from the internet at all.
+#
+# The source must be the security group EKS creates and attaches to nodes
+# itself. A managed node group takes no security_group_ids argument — that
+# requires a launch template — so a hand-rolled "nodes" security group is
+# attached to nothing, and an RDS rule pointing at it silently permits traffic
+# from no one. That failure surfaces late and unhelpfully, as Prisma's
+# "P1001: Can't reach database server" from inside the migration job.
+resource "aws_security_group_rule" "database_from_cluster" {
+  description              = "Postgres from cluster nodes and pods"
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.database.id
+  source_security_group_id = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
 }

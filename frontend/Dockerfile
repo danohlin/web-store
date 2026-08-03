@@ -33,6 +33,13 @@ COPY --from=build /app/dist /usr/share/nginx/html
 # fail nginx's config check at startup.
 ENV BACKEND_ORIGIN=http://backend:4000
 
+# Opt in to the image's own resolver detection. Its 15-local-resolvers.envsh
+# returns immediately unless this is set, which would leave the literal string
+# ${NGINX_LOCAL_RESOLVERS} in the rendered config and stop nginx from starting.
+# With it enabled the nameserver is read from /etc/resolv.conf at boot, so the
+# same image works under Docker's embedded DNS and under kube-dns.
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
+
 EXPOSE 8080
 
 STOPSIGNAL SIGQUIT
