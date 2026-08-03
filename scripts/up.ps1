@@ -229,8 +229,28 @@ if (-not $Tag) { $Tag = (git rev-parse --short HEAD) }
 Info "Tag: $Tag"
 
 if (-not $SkipBuild) {
-  aws ecr get-login-password --region $tf.region | docker login --username AWS --password-stdin $registry | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'ECR login failed' }
+  <#
+  Docker rejects the ECR token with 400 Bad Request when it arrives on stdin
+  from PowerShell, and also when written directly to the redirected stream from
+  .NET — including as raw ASCII bytes with no BOM. Only a byte-clean shell pipe
+  works. Verified against docker 29.6.2: the same token succeeds via
+  --password and via a cmd pipe, and fails every other way.
+
+  --password would be simpler but puts the token on the command line, where any
+  local process can read it. The token goes to a temp file instead, is piped in
+  by cmd, and the file is removed immediately afterwards.
+  #>
+  $tokenFile = Join-Path ([IO.Path]::GetTempPath()) "ecr-$([guid]::NewGuid().ToString('N')).txt"
+  try {
+    $token = aws ecr get-login-password --region $tf.region
+    if ($LASTEXITCODE -ne 0) { throw 'could not obtain an ECR token' }
+
+    [IO.File]::WriteAllText($tokenFile, $token, (New-Object System.Text.UTF8Encoding($false)))
+    cmd /c "type `"$tokenFile`" | docker login --username AWS --password-stdin $registry" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'ECR login failed' }
+  } finally {
+    Remove-Item $tokenFile -Force -ErrorAction SilentlyContinue
+  }
 
   docker build -t "$($repos.backend):$Tag" --target runtime ./backend
   docker build -t "$($repos.migrator):$Tag" --target migrator ./backend
