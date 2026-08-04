@@ -76,6 +76,8 @@ jobs:
           context: ./backend
           target: runtime
           push: true
+          # See scripts/up.ps1 for why attestations are off.
+          provenance: false
           tags: ${{ steps.names.outputs.registry }}/${{ env.PROJECT }}/backend:${{ steps.names.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -86,6 +88,8 @@ jobs:
           context: ./backend
           target: migrator
           push: true
+          # See scripts/up.ps1 for why attestations are off.
+          provenance: false
           tags: ${{ steps.names.outputs.registry }}/${{ env.PROJECT }}/migrator:${{ steps.names.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -95,6 +99,8 @@ jobs:
         with:
           context: ./frontend
           push: true
+          # See scripts/up.ps1 for why attestations are off.
+          provenance: false
           tags: ${{ steps.names.outputs.registry }}/${{ env.PROJECT }}/frontend:${{ steps.names.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -168,6 +174,7 @@ jobs:
                      -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
               echo "| URL | http://${ADDR} |"
             else
-              echo "| Status | Cluster down — images pushed, deploy skipped |"
+              echo "| Status | Cluster down - images pushed, deploy skipped |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+

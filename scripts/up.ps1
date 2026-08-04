@@ -312,9 +312,21 @@ if (-not $SkipBuild) {
     Remove-Item $tokenFile -Force -ErrorAction SilentlyContinue
   }
 
-  docker build -t "$($repos.backend):$Tag" --target runtime ./backend
-  docker build -t "$($repos.migrator):$Tag" --target migrator ./backend
-  docker build -t "$($repos.frontend):$Tag" ./frontend
+  <#
+  --provenance=false suppresses buildx's attestation manifests.
+
+  With them on, every push produces a manifest LIST whose child manifests appear
+  in ECR as separate untagged images. That is a problem here for two reasons:
+  the repository fills with entries that look like junk but are not, and the
+  lifecycle rule that expires untagged images after a day can delete the children
+  of a live tag and corrupt it.
+
+  Attestations are worth having on a release pipeline. For a dev environment
+  rebuilt daily they cost clarity and storage and buy nothing.
+  #>
+  docker build --provenance=false -t "$($repos.backend):$Tag" --target runtime ./backend
+  docker build --provenance=false -t "$($repos.migrator):$Tag" --target migrator ./backend
+  docker build --provenance=false -t "$($repos.frontend):$Tag" ./frontend
   foreach ($r in $repos.backend, $repos.migrator, $repos.frontend) {
     docker push "${r}:$Tag" | Out-Null
     Ok "pushed $(($r -split '/')[-1]):$Tag"
