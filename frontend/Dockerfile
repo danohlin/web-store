@@ -18,7 +18,7 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 # nginx-unprivileged runs as a non-root user and listens on 8080, so the pod
 # needs no capabilities and the container filesystem can stay read-only.
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine AS runtime
 
 # Rendered by the image's entrypoint, which substitutes only variables that are
 # actually set in the environment — so nginx's own $uri and $host survive.

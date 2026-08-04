@@ -65,13 +65,23 @@ resource "aws_iam_role" "alb_controller" {
   }
 }
 
-# Vendored from kubernetes-sigs/aws-load-balancer-controller v2.11.0 rather
-# than hand-written: it is 16 statements of fine-grained ELB and EC2
-# permissions, and an omission surfaces as a controller that silently fails to
-# create a load balancer.
+# Vendored from kubernetes-sigs/aws-load-balancer-controller rather than
+# hand-written: it is 16 statements of fine-grained ELB and EC2 permissions, and
+# an omission surfaces as a controller that silently fails to create a load
+# balancer.
+#
+# This MUST be refreshed whenever alb_controller_chart_version moves. The two
+# are a matched pair. Holding the policy at v2.11.0 while the chart floated to
+# v3.5.0 would have withheld four permissions the newer controller needs,
+# including elasticloadbalancing:SetRulePriorities — which is precisely how the
+# ALB enforces that /api is evaluated before the catch-all route.
+#
+# Refresh with:
+#   curl -o infra/ephemeral/policies/alb-controller-iam-policy.json \
+#     https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/vX.Y.Z/docs/install/iam_policy.json
 resource "aws_iam_policy" "alb_controller" {
   name_prefix = "${local.name}-alb-"
-  description = "AWS Load Balancer Controller (upstream policy v2.11.0)"
+  description = "AWS Load Balancer Controller (upstream policy v3.5.0)"
   policy      = file("${path.module}/policies/alb-controller-iam-policy.json")
 }
 

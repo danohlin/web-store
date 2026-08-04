@@ -32,6 +32,26 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+<#
+Cluster add-on chart versions, pinned deliberately.
+
+Installing "whatever is latest today" makes a daily rebuild non-reproducible:
+a green run proves nothing about tomorrow, because an upstream release lands
+without any change on your side.
+
+The ALB controller pin is load-bearing beyond reproducibility. Its IAM policy is
+vendored at infra/ephemeral/policies/ and must match the controller version. The
+two drifted once already — the policy sat at v2.11.0 while the chart floated to
+v3.5.0, which withholds four permissions the newer controller needs, including
+elasticloadbalancing:SetRulePriorities. That is how the ALB orders routing
+rules, so /api would have stopped taking precedence over the catch-all.
+
+When bumping ALB_CHART_VERSION, re-vendor the policy from the matching tag.
+#>
+$ALB_CHART_VERSION        = '3.5.0'
+$CSI_DRIVER_CHART_VERSION = '1.6.0'
+$CSI_AWS_CHART_VERSION    = '3.1.2'
+
 $repoRoot = git rev-parse --show-toplevel
 Set-Location $repoRoot
 
@@ -44,16 +64,6 @@ function Info($msg) { Write-Host "    $msg" -ForegroundColor DarkGray }
 function Ok($msg) { Write-Host "    $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
 
-<#
-Terraform holds a state lock for the duration of an operation and releases it
-on exit. A run that is killed — Ctrl-C, a timeout, a closed window — never gets
-to release it, and every later run then fails with "Error acquiring the state
-lock" until it is cleared by hand.
-
-This clears a lock only when no terraform process is running locally, which is
-the signature of an abandoned run rather than a concurrent one. It deliberately
-does not force past a live operation.
-#>
 <#
 Runs terraform and returns its exit code plus stderr, without tripping
 $ErrorActionPreference = 'Stop'.
@@ -82,6 +92,16 @@ function Invoke-Terraform {
   }
 }
 
+<#
+Terraform holds a state lock for the duration of an operation and releases it
+on exit. A run that is killed — Ctrl-C, a timeout, a closed window — never gets
+to release it, and every later run then fails with "Error acquiring the state
+lock" until it is cleared by hand.
+
+This clears a lock only when no terraform process is running locally, which is
+the signature of an abandoned run rather than a concurrent one. It deliberately
+does not force past a live operation.
+#>
 function Clear-StaleLock {
   param([string]$Output)
 
@@ -205,6 +225,7 @@ helm repo add aws-secrets-manager https://aws.github.io/secrets-store-csi-driver
 helm repo update 2>&1 | Out-Null
 
 helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller `
+  --version $ALB_CHART_VERSION `
   --namespace kube-system `
   --set clusterName=$($tf.cluster_name) `
   --set serviceAccount.create=true `
@@ -253,6 +274,7 @@ is requested here. Without it every mount fails with:
 The audience must be sts.amazonaws.com to match what AWS STS expects.
 #>
 helm upgrade --install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver `
+  --version $CSI_DRIVER_CHART_VERSION `
   --namespace kube-system `
   --set syncSecret.enabled=false `
   --set enableSecretRotation=false `
@@ -272,6 +294,7 @@ if ($LASTEXITCODE -ne 0) { throw 'CSI driver install failed' }
 # The chart exposes no serviceAccount.annotations value, so the IRSA annotation
 # is applied afterwards with kubectl.
 helm upgrade --install secrets-provider-aws aws-secrets-manager/secrets-store-csi-driver-provider-aws `
+  --version $CSI_AWS_CHART_VERSION `
   --namespace kube-system `
   --set "secrets-store-csi-driver.install=false" `
   --set fullnameOverride=secrets-store-csi-driver-provider-aws `
