@@ -174,8 +174,10 @@ jobs:
           tar -xzf /tmp/kubeconform.tar.gz -C /tmp
           # SecretProviderClass is a CRD with no published schema, hence
           # ignore-missing-schemas; everything else is checked strictly.
+          # Keep in step with kubernetes_version in infra/ephemeral/variables.tf,
+          # so the manifests are checked against the API the cluster actually runs.
           /tmp/kubeconform -strict -summary -ignore-missing-schemas \
-            -kubernetes-version 1.32.0 /tmp/rendered.yaml
+            -kubernetes-version 1.36.0 /tmp/rendered.yaml
 
       - name: terraform fmt
         run: terraform fmt -check -recursive infra/

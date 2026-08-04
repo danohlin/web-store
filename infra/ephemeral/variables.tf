@@ -106,12 +106,26 @@ variable "node_disk_size_gb" {
 
 variable "kubernetes_version" {
   description = <<-EOT
-    EKS control plane version. Check what is currently supported with:
-      aws eks describe-addon-versions --query 'addons[0].addonVersions[0].compatibilities[].clusterVersion'
-    A version past end of support will fail the apply.
+    EKS control plane version.
+
+    Keep this inside standard support. A cluster on a version past that date
+    still runs, but silently moves to extended support at $0.60/hr instead of
+    $0.10/hr — six times the control plane cost, and roughly four times the
+    total bill for this environment. Nothing fails; the invoice just grows.
+
+    Check current dates with:
+      aws eks describe-cluster-versions --region us-east-1 \
+        --query 'clusterVersions[].[clusterVersion,endOfStandardSupportDate]'
+
+    Prefer the newest available rather than the smallest bump. This environment
+    is destroyed and rebuilt daily, so there is no in-place upgrade risk to
+    trade against a longer support window. The add-on versions are resolved
+    from the cluster version rather than pinned, so they follow automatically.
+
+    1.36 has standard support until 2027-08-01.
   EOT
   type        = string
-  default     = "1.32"
+  default     = "1.36"
 }
 
 variable "cluster_public_access_cidrs" {
