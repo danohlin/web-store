@@ -85,14 +85,16 @@ jobs:
           fail() { FAILED=1; echo "::error::$1"; }
 
           # An audit that silently extracts nothing reports "all clear" while
-          # checking nothing, which is worse than not running. Every value read
-          # out of this repository is required to be non-empty and
-          # version-shaped, so that a file being reformatted cannot quietly
-          # turn a check into a no-op.
+          # checking nothing, which is worse than not running. Both sides of
+          # every comparison must be non-empty and version-shaped before they
+          # are worth comparing — a reformatted source file and an upstream
+          # error body are the same failure wearing different clothes, and
+          # neither may quietly turn a check into a no-op or, worse, into a
+          # confident report about a value nobody validated.
           require() {
             local name="$1" value="$2"
             if ! printf '%s' "$value" | grep -qE '^[0-9]+(\.[0-9]+)+$'; then
-              fail "Could not extract ${name} (got '${value}'). A pattern in this workflow no longer matches the source file."
+              fail "${name} is not version-shaped (got '${value}'). Either a file this workflow reads was reformatted, or an upstream response changed."
               return 1
             fi
           }
@@ -219,6 +221,7 @@ jobs:
               fail "helm finds no chart matching ${repo}. The repository or the chart name has moved, and this check has been inert since it did."
               return 1
             fi
+            require "the published ${label} version" "$latest" || return 1
 
             echo "$label pin=$pin latest=$latest"
             if [ "${pin%%.*}" != "${latest%%.*}" ]; then
@@ -236,10 +239,17 @@ jobs:
           if require 'the AWS provider constraint' "$PROV_PIN" &&
              lookup 'the latest AWS provider release' \
                gh api repos/hashicorp/terraform-provider-aws/releases/latest --jq '.tag_name'; then
+            # Shape-checked like everything read out of the repo, and for the
+            # same reason. Unauthenticated, this lookup used to be a bare curl
+            # whose error body has no .tag_name, so jq printed "null", `tr`
+            # left "null", and "6" != "null" filed a straight-faced report that
+            # null was a newer major than 6.0. It opened a real issue.
             PROV_LATEST=$(printf '%s' "$LOOKUP_OUT" | tr -d 'v')
-            echo "AWS provider pin=$PROV_PIN latest=$PROV_LATEST"
-            if [ "${PROV_PIN%%.*}" != "${PROV_LATEST%%.*}" ]; then
-              note "Terraform AWS provider is constrained to ~> ${PROV_PIN}; ${PROV_LATEST} is a newer major. HashiCorp concentrates fixes on the current major."
+            if require 'the latest AWS provider version' "$PROV_LATEST"; then
+              echo "AWS provider pin=$PROV_PIN latest=$PROV_LATEST"
+              if [ "${PROV_PIN%%.*}" != "${PROV_LATEST%%.*}" ]; then
+                note "Terraform AWS provider is constrained to ~> ${PROV_PIN}; ${PROV_LATEST} is a newer major. HashiCorp concentrates fixes on the current major."
+              fi
             fi
           fi
 
