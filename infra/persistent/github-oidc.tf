@@ -103,12 +103,36 @@ data "aws_iam_policy_document" "github_actions" {
   # the cluster is governed separately, by an EKS access entry — IAM alone
   # grants no Kubernetes permissions.
   statement {
-    sid     = "EksDescribe"
+    sid     = "EksDescribeCluster"
     effect  = "Allow"
-    actions = ["eks:DescribeCluster", "eks:ListClusters"]
+    actions = ["eks:DescribeCluster"]
     resources = [
       "arn:aws:eks:${var.region}:${local.account_id}:cluster/${var.project}-*"
     ]
+  }
+
+  # The EKS reads that are not about any particular cluster, which is precisely
+  # why they need their own statement.
+  #
+  # Neither action is resource-scoped: DescribeClusterVersions reports the EKS
+  # release calendar rather than the state of a cluster, and ListClusters is the
+  # call that discovers cluster ARNs in the first place, so it cannot be
+  # conditioned on knowing one. AWS evaluates both against `*`, and an `*`
+  # action confined to a cluster ARN is simply denied.
+  #
+  # Grouping them with DescribeCluster above therefore granted neither. The
+  # version audit died on the resulting AccessDenied every Monday, and because
+  # the AWS CLI reports service errors as exit 254 the log said nothing beyond
+  # "Process completed with exit code 254". ListClusters had never worked
+  # either; nothing had happened to call it yet.
+  #
+  # Still read-only. Account-wide visibility of cluster names and of AWS's
+  # published version dates is not a meaningful widening of this role.
+  statement {
+    sid       = "EksServiceReads"
+    effect    = "Allow"
+    actions   = ["eks:DescribeClusterVersions", "eks:ListClusters"]
+    resources = ["*"]
   }
 }
 
