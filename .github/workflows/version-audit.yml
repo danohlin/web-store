@@ -30,39 +30,89 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Read-only AWS access, needed for the EKS support dates. Uses the same
       # OIDC role as deploys; it can describe but not create.
       - name: Assume the deploy role
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: gha-audit-${{ github.run_id }}
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
 
       - name: Audit
         id: audit
+        env:
+          # For the release lookup below. Unauthenticated api.github.com is
+          # limited by runner IP, which is shared; the token raises the ceiling
+          # far above anything a weekly job could reach.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # shellcheck disable=SC2016
           # This script is largely regex over config files. Single quotes are
           # correct throughout: every $ here is an end-of-line anchor or a
           # literal PowerShell sigil being matched, never a variable to expand.
           set -uo pipefail
+
+          # The `+e` is deliberate, and it has to be an explicit `+e` rather
+          # than merely declining to pass `-e`: GitHub runs `run:` steps as
+          # `bash -e {0}`, so errexit is already on before the first line of
+          # this script and not setting it achieves nothing.
+          #
+          # That cost two Mondays. The first AWS call returned AccessDenied,
+          # errexit killed the step mid-pipeline carrying the CLI's own status,
+          # and the entire record of a run that checks eight things was
+          # "Process completed with exit code 254" — no findings, no error, no
+          # indication of which check had died or why.
+          #
+          # This job is a report, so it runs every check and totals up at the
+          # end: one broken lookup must not conceal the seven that still work.
+          # Nothing is allowed to fail quietly, though — see `fail` below.
+          set +e
+
           FINDINGS=""
+          FAILED=0
+          LOOKUP_OUT=""
+          STDERR=$(mktemp)
+
+          # A finding is the audit working: something is stale and wants a
+          # human. A failure is the audit itself being broken, which is not
+          # "nothing to report" and must never be mistaken for it.
           note() { FINDINGS="${FINDINGS}- $1"$'\n'; echo "::warning::$1"; }
+          fail() { FAILED=1; echo "::error::$1"; }
 
           # An audit that silently extracts nothing reports "all clear" while
-          # checking nothing, which is worse than not running. Every value below
-          # is required to be non-empty and version-shaped, and the job fails
-          # loudly if a pattern stops matching because a file was reformatted.
+          # checking nothing, which is worse than not running. Every value read
+          # out of this repository is required to be non-empty and
+          # version-shaped, so that a file being reformatted cannot quietly
+          # turn a check into a no-op.
           require() {
             local name="$1" value="$2"
             if ! printf '%s' "$value" | grep -qE '^[0-9]+(\.[0-9]+)+$'; then
-              echo "::error::Could not extract ${name} (got '${value}'). A pattern in this workflow no longer matches the source file."
-              exit 1
+              fail "Could not extract ${name} (got '${value}'). A pattern in this workflow no longer matches the source file."
+              return 1
+            fi
+          }
+
+          # The same standard for the other half of every comparison. An
+          # upstream lookup that fails must not read as "nothing to report",
+          # and its stderr has to reach the log — the 254 was undiagnosable
+          # from the run alone because the only account of the reason had been
+          # redirected to /dev/null.
+          #
+          # The result lands in LOOKUP_OUT rather than on stdout: read through
+          # `$(...)` this would run in a subshell, where setting FAILED affects
+          # nothing and a failed lookup would again go unnoticed.
+          lookup() {
+            local name="$1"; shift
+            local rc
+            LOOKUP_OUT=$("$@" 2>"$STDERR"); rc=$?
+            if [ "$rc" -ne 0 ]; then
+              fail "Could not look up ${name} (exit ${rc}): $(tr '\n' ' ' < "$STDERR" | cut -c1-400)"
+              return 1
             fi
           }
 
@@ -78,16 +128,28 @@ jobs:
           # the default, silently yielding an empty version.
           PINNED_EKS=$(awk '/variable "kubernetes_version"/,/^}/' infra/ephemeral/variables.tf \
                        | grep -m1 'default' | sed -E 's/.*"([0-9.]+)".*/\1/')
-          require 'the pinned EKS version' "$PINNED_EKS"
-          EOL=$(aws eks describe-cluster-versions --region "$AWS_REGION" \
-                --query "clusterVersions[?clusterVersion=='${PINNED_EKS}'].endOfStandardSupportDate" \
-                --output text 2>/dev/null | cut -d'T' -f1)
-          NEWEST=$(aws eks describe-cluster-versions --region "$AWS_REGION" \
-                   --query 'clusterVersions[].clusterVersion' --output text 2>/dev/null | tr '\t' '\n' | sort -V | tail -1)
 
-          echo "EKS pinned=$PINNED_EKS end-of-standard-support=$EOL newest=$NEWEST"
-          if [ -n "$EOL" ]; then
-            if [ "$(date -u +%Y-%m-%d)" \> "$EOL" ]; then
+          # --include-all carries more weight than it looks. Without it the API
+          # returns only versions still in standard or extended support, so a
+          # pin that has fallen off the calendar altogether comes back empty —
+          # meaning the further past its support date a cluster drifts, the
+          # less this check has to say, until the worst case reports nothing.
+          #
+          # One call, read twice: two calls could disagree, and this is slow
+          # enough to be worth not repeating.
+          if require 'the pinned EKS version' "$PINNED_EKS" &&
+             lookup 'the EKS version calendar' \
+               aws eks describe-cluster-versions --region "$AWS_REGION" --include-all --output json; then
+            EKS_JSON="$LOOKUP_OUT"
+            EOL=$(printf '%s' "$EKS_JSON" | jq -r --arg v "$PINNED_EKS" \
+                  '.clusterVersions[] | select(.clusterVersion == $v) | .endOfStandardSupportDate' \
+                  | cut -d'T' -f1)
+            NEWEST=$(printf '%s' "$EKS_JSON" | jq -r '.clusterVersions[].clusterVersion' | sort -V | tail -1)
+            echo "EKS pinned=$PINNED_EKS end-of-standard-support=$EOL newest=$NEWEST"
+
+            if [ -z "$EOL" ]; then
+              fail "EKS ${PINNED_EKS} does not appear in the version calendar at all, not even as unsupported. Check \`kubernetes_version\` in \`infra/ephemeral/variables.tf\`."
+            elif [ "$(date -u +%Y-%m-%d)" \> "$EOL" ]; then
               note "**EKS ${PINNED_EKS} is past end of standard support** (ended ${EOL}). The control plane now bills at \$0.60/hr instead of \$0.10. Newest available: ${NEWEST}. Fix: \`kubernetes_version\` in \`infra/ephemeral/variables.tf\`."
             elif [ "$(date -u -d '+90 days' +%Y-%m-%d)" \> "$EOL" ]; then
               note "EKS ${PINNED_EKS} leaves standard support on ${EOL}, within 90 days. Newest available: ${NEWEST}."
@@ -107,34 +169,59 @@ jobs:
           # '.' matches PowerShell's $ sigil without embedding a literal $.
           CHART_PIN=$(grep -m1 '^.ALB_CHART_VERSION' scripts/up.ps1 | sed -E "s/.*'([0-9.]+)'.*/\1/")
           POLICY_VER=$(grep -m1 'upstream policy v' infra/ephemeral/iam-irsa.tf | sed -E 's/.*v([0-9.]+).*/\1/')
-          require 'the ALB chart pin' "$CHART_PIN"
-          require 'the vendored ALB policy version' "$POLICY_VER"
-          echo "ALB chart pin=$CHART_PIN vendored policy=$POLICY_VER"
-          if [ "$CHART_PIN" != "$POLICY_VER" ]; then
-            note "**ALB controller chart (${CHART_PIN}) and its vendored IAM policy (${POLICY_VER}) disagree.** Re-vendor from \`https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v${CHART_PIN}/docs/install/iam_policy.json\`."
-          fi
+          if require 'the ALB chart pin' "$CHART_PIN" &&
+             require 'the vendored ALB policy version' "$POLICY_VER"; then
+            echo "ALB chart pin=$CHART_PIN vendored policy=$POLICY_VER"
+            if [ "$CHART_PIN" != "$POLICY_VER" ]; then
+              note "**ALB controller chart (${CHART_PIN}) and its vendored IAM policy (${POLICY_VER}) disagree.** Re-vendor from \`https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v${CHART_PIN}/docs/install/iam_policy.json\`."
+            fi
 
-          # Does upstream still publish the policy we vendored?
-          if ! curl -sfI "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v${POLICY_VER}/docs/install/iam_policy.json" >/dev/null; then
-            note "The vendored ALB IAM policy claims v${POLICY_VER}, but upstream has no such tag. The version comment is wrong."
+            # Does upstream still publish the policy we vendored?
+            #
+            # Split by exit status rather than treating any non-zero as proof.
+            # With -f, curl returns 22 for an HTTP error and something else for
+            # a network or TLS problem; conflating them would file a confident
+            # "upstream has no such tag" on the strength of a flaky minute.
+            curl -sS -f -I "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v${POLICY_VER}/docs/install/iam_policy.json" >/dev/null 2>"$STDERR"
+            case $? in
+              0)  ;;
+              22) note "The vendored ALB IAM policy claims v${POLICY_VER}, but upstream has no such tag. The version comment is wrong." ;;
+              *)  fail "Could not reach raw.githubusercontent.com to confirm ALB policy v${POLICY_VER}: $(tr '\n' ' ' < "$STDERR" | cut -c1-200)" ;;
+            esac
           fi
 
           # ---------------------------------------------------------------
           # Helm charts: newer major available?
           # ---------------------------------------------------------------
-          helm repo add eks https://aws.github.io/eks-charts >/dev/null 2>&1
-          helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts >/dev/null 2>&1
-          helm repo add aws-secrets-manager https://aws.github.io/secrets-store-csi-driver-provider-aws >/dev/null 2>&1
-          helm repo update >/dev/null 2>&1
+          # A repo that fails to add, or an index that fails to refresh, makes
+          # every chart below report nothing findable. Left unchecked that is
+          # indistinguishable from three charts being up to date.
+          lookup 'the eks-charts repository' \
+            helm repo add eks https://aws.github.io/eks-charts --force-update
+          lookup 'the secrets-store-csi-driver repository' \
+            helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts --force-update
+          lookup 'the AWS secrets provider repository' \
+            helm repo add aws-secrets-manager https://aws.github.io/secrets-store-csi-driver-provider-aws --force-update
+          lookup 'the current chart indexes' helm repo update
 
           check_chart() {
             local repo="$1" var="$2" label="$3"
             local pin latest
             pin=$(grep -m1 "^.${var}" scripts/up.ps1 | sed -E "s/.*'([0-9.]+)'.*/\1/")
-            require "the ${label} pin" "$pin"
-            latest=$(helm search repo "$repo" --output json 2>/dev/null | jq -r '.[0].version // empty')
+            require "the ${label} pin" "$pin" || return 1
+            lookup "the published ${label} versions" helm search repo "$repo" --output json || return 1
+
+            # An empty result is a successful search that found no such chart,
+            # which means the chart has been renamed or moved, not that there
+            # is nothing newer.
+            latest=$(printf '%s' "$LOOKUP_OUT" | jq -r '.[0].version // empty')
+            if [ -z "$latest" ]; then
+              fail "helm finds no chart matching ${repo}. The repository or the chart name has moved, and this check has been inert since it did."
+              return 1
+            fi
+
             echo "$label pin=$pin latest=$latest"
-            if [ -n "$latest" ] && [ "${pin%%.*}" != "${latest%%.*}" ]; then
+            if [ "${pin%%.*}" != "${latest%%.*}" ]; then
               note "${label} is pinned at ${pin}; ${latest} is a newer major. Review before bumping — for the ALB controller the IAM policy must move with it."
             fi
           }
@@ -146,26 +233,42 @@ jobs:
           # Terraform AWS provider
           # ---------------------------------------------------------------
           PROV_PIN=$(grep -m1 -A1 'hashicorp/aws' infra/ephemeral/versions.tf | grep version | sed -E 's/.*~> ([0-9.]+).*/\1/')
-          require 'the AWS provider constraint' "$PROV_PIN"
-          PROV_LATEST=$(curl -s https://api.github.com/repos/hashicorp/terraform-provider-aws/releases/latest | jq -r '.tag_name' | tr -d 'v')
-          echo "AWS provider pin=$PROV_PIN latest=$PROV_LATEST"
-          if [ "${PROV_PIN%%.*}" != "${PROV_LATEST%%.*}" ]; then
-            note "Terraform AWS provider is constrained to ~> ${PROV_PIN}; ${PROV_LATEST} is a newer major. HashiCorp concentrates fixes on the current major."
+          if require 'the AWS provider constraint' "$PROV_PIN" &&
+             lookup 'the latest AWS provider release' \
+               gh api repos/hashicorp/terraform-provider-aws/releases/latest --jq '.tag_name'; then
+            PROV_LATEST=$(printf '%s' "$LOOKUP_OUT" | tr -d 'v')
+            echo "AWS provider pin=$PROV_PIN latest=$PROV_LATEST"
+            if [ "${PROV_PIN%%.*}" != "${PROV_LATEST%%.*}" ]; then
+              note "Terraform AWS provider is constrained to ~> ${PROV_PIN}; ${PROV_LATEST} is a newer major. HashiCorp concentrates fixes on the current major."
+            fi
           fi
 
           # ---------------------------------------------------------------
           # nginx base image — the one component facing the internet
           # ---------------------------------------------------------------
           NGINX_PIN=$(grep -m1 'FROM nginxinc/nginx-unprivileged' frontend/Dockerfile | sed -E 's/.*:([0-9.]+)-alpine.*/\1/')
-          require 'the nginx pin' "$NGINX_PIN"
-          NGINX_LATEST=$(curl -s 'https://hub.docker.com/v2/repositories/nginxinc/nginx-unprivileged/tags?page_size=100&name=-alpine' \
-                         | jq -r '.results[].name' | grep -E '^[0-9]+\.[0-9]+-alpine$' | sed 's/-alpine//' | sort -V | tail -1)
-          echo "nginx pin=$NGINX_PIN latest=$NGINX_LATEST"
-          if [ -n "$NGINX_LATEST" ] && [ "$NGINX_PIN" != "$NGINX_LATEST" ]; then
-            note "nginx is pinned at ${NGINX_PIN}; ${NGINX_LATEST} is available. It is the only internet-facing component, so security fixes matter."
+          if require 'the nginx pin' "$NGINX_PIN" &&
+             lookup 'the nginx-unprivileged tags' \
+               curl -sS -f 'https://hub.docker.com/v2/repositories/nginxinc/nginx-unprivileged/tags?page_size=100&name=-alpine'; then
+            NGINX_LATEST=$(printf '%s' "$LOOKUP_OUT" | jq -r '.results[].name' \
+                           | grep -E '^[0-9]+\.[0-9]+-alpine$' | sed 's/-alpine//' | sort -V | tail -1)
+
+            # Tags came back but none were <major>.<minor>-alpine, so the
+            # pattern this check reads by no longer describes what Docker Hub
+            # publishes. Silence here would mean an unpatched public edge.
+            if [ -z "$NGINX_LATEST" ]; then
+              fail "Docker Hub returned tags for nginx-unprivileged but none matched <major>.<minor>-alpine. The tag naming has changed."
+            else
+              echo "nginx pin=$NGINX_PIN latest=$NGINX_LATEST"
+              if [ "$NGINX_PIN" != "$NGINX_LATEST" ]; then
+                note "nginx is pinned at ${NGINX_PIN}; ${NGINX_LATEST} is available. It is the only internet-facing component, so security fixes matter."
+              fi
+            fi
           fi
 
           # ---------------------------------------------------------------
+          rm -f "$STDERR"
+
           {
             echo "findings<<EOF"
             echo "$FINDINGS"
@@ -176,11 +279,21 @@ jobs:
             echo "has_findings=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_findings=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::All pinned versions are current."
+            [ "$FAILED" -eq 0 ] && echo "::notice::All pinned versions are current."
           fi
 
+          # Findings leave the job green — they open an issue, which is the
+          # audit doing its job. Red means the audit is broken: a pattern that
+          # stopped matching, or something upstream that could not be reached.
+          # Both are states in which this workflow knows nothing, and neither
+          # should be able to look like good news.
+          exit "$FAILED"
+
+      # Findings collected before a failing check are still true, and the
+      # outputs are written before the audit sets its exit status. Gating on
+      # success would discard real findings whenever any one lookup broke.
       - name: Open or update an issue
-        if: steps.audit.outputs.has_findings == 'true'
+        if: ${{ !cancelled() && steps.audit.outputs.has_findings == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FINDINGS: ${{ steps.audit.outputs.findings }}
@@ -203,13 +316,24 @@ jobs:
 
       - name: Summary
         if: always()
+        # Read through the environment, not by interpolating `${{ }}` into the
+        # script. Three states, not two: when the audit dies before writing its
+        # outputs this expands to the empty string, and the old two-branch form
+        # fell through to printing "All pinned versions are current" across the
+        # summary of a run that had checked nothing at all.
+        env:
+          HAS_FINDINGS: ${{ steps.audit.outputs.has_findings }}
+          FINDINGS: ${{ steps.audit.outputs.findings }}
         run: |
+          set -uo pipefail
           {
             echo "### Version audit"
             echo ""
-            if [ "${{ steps.audit.outputs.has_findings }}" = "true" ]; then
-              echo "${{ steps.audit.outputs.findings }}"
-            else
+            if [ "${HAS_FINDINGS:-}" = "true" ]; then
+              echo "$FINDINGS"
+            elif [ "${HAS_FINDINGS:-}" = "false" ]; then
               echo "All pinned versions are current."
+            else
+              echo "The audit did not finish, so nothing was checked. See the step log."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
